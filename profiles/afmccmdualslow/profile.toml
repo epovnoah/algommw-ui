@@ -1,0 +1,197 @@
+# 静止双 PRF 速度扩展实验波形(镜像 AFM761_single_step_dual_profile.appimage,SHA-256 2f3baacd…f36a;
+# 源码 test/single-step-prf-waveform@9852a940,波形说明见 ccm/data/Dual/雷达静止双PRF速度扩展/波形配置说明.md)。
+# A/B:4TX×4RX,6 子带,768 chirp,512 记录行(CP 后 510 ADC),idle 63.5/76 us → PRI 87.5/100 us,
+# 同为 +977835.724 Hz/chirp 步进;ADCBuf burst 80 ms,每子帧 125 ms(不是 28/32 us、70 ms 的生产波形)。
+# 单帧不模糊速度 ±11.05/±9.67 m/s;7:8 周期比 → 联合不模糊约 ±77.4 m/s(B 帧到 77 m/s 需展开 4 个周期,故 max_unfold=4)。
+# 检测/测角口径与 afmccmdual 一致(ADR 0013);配对(扩展目标共享伙伴、门限)与跟踪(场景盒等)不同,见 ADR 0016。
+# HWA winLen=16 是总参考单元数,本项目 win_len=8 是单侧;零基 OS k=7 对应一基 os_rank=8。
+# 硬件 raw RD 绝对门限依赖 HWA 定点标度,没有校准映射时不套到浮点功率上,见 ADR 0013。
+
+[ingest]
+format = "afm761"
+rx_map = [3, 2, 1, 4]          # 同 ccm 的 rx_adc_order = (2,1,0,3)
+cp_adc = true                  # 去 CP 行、末尾补零;实采样只有前 510 点,距离门只用前半
+
+[waveform]
+modulation = "ddm"
+num_tx = 4
+num_rx = 4
+num_adc_samples = 512
+num_doppler_chirps = 128       # 每子带 doppler bin 数(= RdMap doppler 维)
+num_chirps_per_frame = 768     # = num_subbands × num_doppler_chirps
+num_subbands = 6
+
+start_freq_ghz = 77.0
+freq_slope_mhz_per_us = 8.79   # = 8.79e12 Hz/s
+sample_rate_msps = 30.0
+idle_time_us = 63.5
+ramp_end_time_us = 24.0
+adc_start_time_us = 4.0
+chirp_step_khz = 977.835724
+
+range_step = 0.999201612       # m/bin
+doppler_step = 0.02878742736711753
+fine_range_step = 0.19960140207601645
+frame_period_ms = 125.0        # CLI subFramePeriodicity:每个子帧 125 ms(ADCBuf burst 80 ms)
+
+[calib]
+range_bias_m = 0.0
+
+[mount]
+elev_tilt_deg = 0.0
+height_m = 0.0
+
+
+[cluster]
+mode = "off"
+epsilon_m = 1.5
+weight_z = 0.0
+weight_vel = 4.0
+min_points = 2
+
+[range]
+window = "hann"                # 板端 rangeProc/DopplerProc 的 HWA 窗型
+
+[range.dc_signature]
+enabled = false
+num_pos_bins = 8
+num_neg_bins = 8
+num_avg_chirps = 64
+
+[doppler]
+window = "hann"                # 板端 DopplerProc 的 HWA 窗型
+
+[cfar]
+peak_group_scheme = "det_matrix"
+min_range_bin = 0
+max_range_bin = 255
+range_skip_low = 0
+range_skip_high = 256
+sub_bin_interp = false
+cross_peak_grouping = false
+# 2026-11-20:分组关时同一散射点在主瓣内相邻距离单元重复检出,解耦沿同列爬到局部峰(≤2 格,
+# Hann 主瓣宽度),用峰的粗距离解速度,距离仍用点自己的单元:保留点数,去掉 ΔV = −κΔR 的偏差。
+decouple_peak_climb = 2
+
+[cfar.range]
+# 2026-11-20:距离 CFAR 开、两维峰值分组关(要稠密点云)。同一采集:分组开 10.9 万点、加速车每帧
+# 高速点 2.8;分组关 55.4 万点、30.2;再关距离 CFAR 61.3 万点、35.7。分组关时同一散射点会在相邻
+# 距离单元重复检出,单帧解耦按耦合斜率给它们带上 ΔV = −κΔR 的速度偏差(见 ADR 0016)。
+enabled = true
+os_edge_scale = true
+average_mode = "os"
+threshold_db = 10.0
+guard_len = 0
+win_len = 8
+os_rank = 8                   # 16 个参考单元的第 8 小值
+peak_grouping = false
+average_domain = "power"
+
+[cfar.doppler]
+os_edge_scale = false
+average_mode = "os"
+threshold_db = 10.0
+guard_len = 0
+win_len = 8
+os_rank = 8
+peak_grouping = false
+average_domain = "power"
+
+[doa]
+variant = "corr"
+extended_max_velocity = false
+angle_interp = false
+# 测角相干度门限(全阵口径:估出方向上 16 通道的 |aᴴy|²/(N‖y‖²),不是工作台「相干度」列的水平相关谱口径;ADR 0019)。
+# 本采集静止单元的跨帧角度:相干度 <0.5 的点方位误差 p90 超过 40°,0.5–0.7 为 2.5°,0.5 是拐点。
+# 开 0.5 去掉约 10% 的点,静止单元跳变率 12.5% → 6.5%;近处动目标的俯仰混叠点只少约三成(见 ADR 0019)。
+min_coherence = 0.5
+# 近处俯仰混叠的帧内修复(ADR 0019):两条垂直基线矛盾的点,俯仰改取同帧邻域自洽点的俯仰中位,点数不变。
+elevation_repair = true
+
+[doa.fov]
+enabled = true
+elevation_skip_max_range_bin = 10
+az_min_deg = -65.0
+az_max_deg = 65.0
+el_min_deg = -30.0
+el_max_deg = 30.0
+
+[doa.multi_peak]
+enabled = false
+threshold_scale = 0.5
+
+
+[track]
+# 2026-11-19 敏感性扫描(本采集 699 帧;覆盖率 = 车辆簇帧中 5 m 内有运动航迹的比例):
+# core 默认(场景盒 Y 0..50、起航 4 点、命中 2 点、range 噪声 0.02)下运动车航迹为 0。
+# 量程 255.8 m → 场景盒放到 ±260/0..260;车的点在距离上散布 ±2–6 m(车身多散射点 +
+# 粗距离–速度耦合拖影),range 噪声 0.02(σ 0.14 m)把它们全拒在门外 → 1.0;
+# 远处车每帧常只有 1–3 点 → 起航 3 点、命中 1 点。门限增益/起航距离/多普勒噪声无可测效果,
+# 放宽释放帧数只增加外推航迹。加速车(帧 100–300)覆盖 0% → 92%,航迹速度误差中位 0.011 m/s。
+scene_x_m = [-260.0, 260.0]
+scene_y_m = [0.0, 260.0]
+meas_noise_r = 1.0
+alloc_points = 3
+hit_points = 1
+
+[array]
+file = "array.csv"      # 相对本 profile 目录;标定为 ccm 内置 afm761-2026-10 复增益,见该文件头
+grid_rows = 5                  # z 半λ 网格 −1..3 共 5 行(网格注记;直接加权扫描不消费)
+grid_cols = 35                 # x 半λ 网格 0..34 共 35 列(同上)
+
+# 同一载频步进,只改变 PRI;其余波形物理量继承 A,派生量分别校验。
+[waveform.alternate]
+idle_time_us = 76.0
+doppler_step = 0.025188998946227843
+
+[pair]
+enabled = true
+max_unfold = 4
+# 2026-11-19:单帧只有 ±11/±9.7 m/s,超过 35 km/h 的车就靠配对展开。车是扩展目标:本帧散射点常比
+# 上一帧多,一对一贪心后多出的点只能以折叠速度发布(实采约 20% 车身点速度变号)。share_taken 允许它们
+# 共用已被占用的上一帧点(周期必须与占用者一致,身份/唯一性检查不变)。
+# 门限按物理量:距离门 3 m 覆盖车长与扩展目标的粗距离偏差;粗距离偏 δ 时单帧解沿耦合线
+# 移动 ΔV = −κδ(κ = Sv/Sf ≈ 0.14),3 m 对应 0.43 m/s,加 1.2 m/s² × 125 ms ≈ 0.15 → 速度门 0.6。
+# 实采:车身错误折叠 183+14 → 9+2,高速 PAIRED 434 → 701,两帧后无支持比例 13.8% → 10.3%。
+share_taken = true
+# 2026-11-20:相邻异类帧没有伙伴时,沿用 k−2 同类帧已确认的速度假设(同类帧延续);上一帧已确认的
+# 高速点被同 RD 单元的静止杂波遮挡时,按展开速度救回。实采帧 580–583:B 帧车与 83.6 m 杂波撞进
+# 同一单元(车速 ≈ 4×128×Sv_B),车整帧消失 → 下一帧折叠成 +9.3 → 再下一帧被扣下。
+carry_confirmed = true
+rescue_unfolded = true
+range_gate_m = 3.0
+velocity_gate_mps = 0.6
+max_speed_mps = 77.0
+# 速度身份验证:视线角、阵列签名、双向候选唯一性;近零折叠也允许枚举。
+angle_gate_deg = 10.0
+min_coherence = 0.5
+# 2026-11-25 盲速/跨物体错配修复(ADR 0020):(0,0) 候选也查阵列相关度;方位差进关联代价,
+# σ = √(0.5² + (横向 1 m / R)²) 度(静止点跨帧测角重复性 + 车半宽)。合成对抗测试台
+# (python python/bench ccm adversarial)盲速 E1:slow 13.3%→1.1%、dual 13.9%→7.5%,σ 0.25–1°、
+# 横向 0.5–2 m 为平台;1125/dualslow 盲速帧车上 v≈0 点 3.75→0.57/帧,点数基本不变。
+zero_identity = true
+azimuth_sigma_deg = 0.5
+lateral_extent_m = 1.0
+ambiguity_margin = 0.1
+min_overlap_speed_mps = 0.3
+overlap_range_bins = 1.5
+overlap_doppler_bins = 1.5
+occupant_range_bins = 4.0
+mask_margin_db = 2.2489057294217365
+# 实际 HWA Q11:765×20log10(2)/2048,不照抄固件注释里约 3dB 的近似。
+
+[cfar.segments]
+end_bins = [40, 80]
+range_threshold_db = [12.0, 9.0, 7.0]
+# 2026-11-19:回到固件 cfarRangeThreshCfg -1 1 40 80 12 9 7 9 6 5 的速度门限(11-17 曾各加 2 dB)。
+doppler_threshold_db = [9.0, 6.0, 5.0]
+
+[cfar.dominant_supplement]
+enabled = true
+start_bin = 19
+end_bin = 127
+dominance_threshold_db = 2.9397460514060664 # 1000 raw,Q11 log2 幅度
+threshold_db = 2.9985409724341876           # 1020 raw
+win_len = 8
+guard_len = 2
+limit = 80

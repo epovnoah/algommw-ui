@@ -1,0 +1,219 @@
+# SR61 TDM 默认 profile —— 项目唯一的配置来源(ADR 0007 起,不再有硬编码副本)。
+# 载入器:python/binding/config.py 的 load_profile()。
+#
+# ⚠ step 红线(见 GBrain algommw-waveform-scale-copied-from-profile):
+# range_step/doppler_step 是波形第一性原理的派生量,不是可调项。本 profile 同时存
+# 原始波形物理量(下方 start_freq_ghz 等)与 step;载入器用 precise c 从原始量独立
+# 推导 step 并校验 stored≈derived 在 1% 内 —— 抓住 gross scale 错(2026-07-17 抄参考
+# profile 的 3.66×/4.76× 事故),容忍 c-constant/手输舍入。错值载入失败。
+
+[waveform]
+modulation = "tdm"             # eModulation (tdm|ddm)
+num_tx = 3
+num_rx = 4
+num_adc_samples = 256
+num_doppler_chirps = 32        # TDM: 每 TX 的 loop 数
+num_chirps_per_frame = 96      # num_tx * num_doppler_chirps
+# num_subbands 省略(TDM=0;DDM 才需要)
+
+# 原始波形物理量(推导/校验 step 用;传感器事实,见 ~/Downloads/mmwave_Calculator.m)
+start_freq_ghz = 60.2
+freq_slope_mhz_per_us = 40
+sample_rate_msps = 12.5
+idle_time_us = 3
+ramp_end_time_us = 27
+adc_start_time_us = 5
+
+# bin→物理标度(波形派生;载入器校验。推导:rangeStep=c/(2·B), B=freqSlope·256/12.5e6=819.2MHz;
+# dopplerStep(TDM)=c/(2·fc·loops·numTx·chirpPeriod), fc=60.8096GHz, chirpPeriod=30us)
+range_step = 0.183105468       # m/bin
+doppler_step = 0.856502955     # (m/s)/bin
+frame_period_ms = 50           # 帧周期 → xFrameTime = 50ms
+
+[calib]
+# 实测标定量(不是推导量!与上面的 step 严格分家,理由见 core/types/calib.h)。
+# range_bias_m = 雷达测得比几何真值远多少米,补偿时从距离里减掉。
+# 本项目尚未做该标定(需要已知距离的角反射器采集),填 0 = 不补偿,与加该参数前逐位相同。
+range_bias_m = 0.0
+
+# 传感器安装姿态(P5):传感器系 → 世界系。语义同 gTrack 的 censor2world:
+#   x' = x;y' = y·cosθ + z·sinθ;z' = −y·sinθ + z·cosθ + h
+# 由 driver 显式调用 eChainToWorld 施加,只作用于直角坐标(点云 xyz、航迹位置/速度/
+# 加速度);球坐标量测 range/az/el 不转 —— 跟踪器的 EKF 就跑在传感器系球坐标上(同 gTrack)。
+# ⚠ 只有俯仰倾角:gTrack 的 azimTilt 在它自己的 3D 源码里零使用。
+# ⚠ 本项目没有带倾角的采集,这一级只有解析测试托底、没有实测验证。默认 (0,0) 精确恒等。
+[mount]
+elev_tilt_deg = 0.0            # 负=上仰,正=下俯(gtrack 口径)
+height_m = 0.0                 # 传感器离世界原点高度,只加在 z' 上
+
+# DBSCAN 聚类(P6),位置在 doa 与 track 之间,由 driver 显式调用 eChainCluster。
+# ⚠ SDK 3.6 的检测链**没有**聚类环节(clusproc DPU 是 SDK 2.x 的,3.6 只把 DBSCAN 作为
+# mmwavelib 库 API 保留、链上零调用点);而本仓库的跟踪器自带 allocation 期聚类 ——
+# 两者职责重叠。开不开要靠 A/B 量,别因为"TI 库里有这个函数"就默认它有用。
+#
+# mode:
+#   off      不聚类(默认)
+#   filter   只丢噪声点(簇 ID=0),簇内点原样保留 —— 纯过滤器,不动"一目标多点"的结构
+#   centroid 一簇一点。⚠ 这会让每个目标只剩 1 个点,而跟踪器起航迹要求簇内 ≥4 点
+#            (ulAllocPointsThr),开它必须同时重标定跟踪参数,否则起不了航迹
+#
+# ⚠ epsilon_m 是**半径**不是平方:TI 的 epsilon 形参是平方阈值(手册 §12.1 专门把它列为
+#   易错点),这里按半径填,内部自己平方。
+# ⚠ min_points **不含被测点自身**(TI 口径:先标 visited 再找邻居)。照抄教科书的
+#   MinPts 推荐值会偏严一档。
+# weight_vel 是量纲统一因子 (σ_p/σ_v)²(手册 §12.3):位置散布 σ_p≈1m、速度散布
+#   σ_v≈0.5m/s ⇒ w=4。weight_z=0 则精确退化为 TI 的 2D(x,y)度量 —— SR61 AOP 俯仰只有
+#   4 行、z 噪声比 x/y 大得多,等权计入很可能把该同簇的点拆开。
+# 跟踪参数(P7 起进 ChainCfg)。⚠ **默认值单源在 core**(vChainTrackDefaults),本表只覆盖
+# 显式写出来的键 —— 其余仍走 C 默认。docs/handbook.md 记着这组参数"未做敏感性扫描、尚未定稿",
+# 所以这里只开放 P7 新增的几项 + gate_gain,别的先不往 profile 里搬。
+#
+# gate_gain 的口径(手册 ch08 §14.3):门限判据是**偏马氏距离**(range/az/el 三维,去 doppler),
+# 近似服从 χ²(3) ⇒ gate_gain 就是分位点:6.251→90%、7.815→95%、9.0→**97.1%**、11.345→99%。
+# 对照 gTrack:它默认 2.0、demo 取 3.0,按全维 χ²(4) 反查只有 26.4%/44.2% —— **不是概率门**,
+# 是"小 G 少进杂波、漏检由状态机兜底"的经验增益。两种取法都成立,但要知道自己用的哪种。
+[track]
+# 组弥散 gD(gTrack 的核心组跟踪机制):gC = gD + J·P·Jᵀ + R_m,门限自适应目标扩展;
+# 质心噪声改用 Blackman 11A.2/11A.3。⚠ 实测(见下)不改变本采集的跟踪结果,默认关。
+group_dispersion = false
+# 径向速度解缠:把折叠在 ±v_max 的多普勒解绕回真值附近。
+# ⚠ 本项目 v_max = ±13.7 m/s 而车只有 5.5 m/s —— 用不上,默认关。它是给高速目标预留的。
+vel_unroll = false
+unroll_alpha = 0.9             # rangeRate 的 EMA 系数(TI unrollingParams.alpha 量级)
+unroll_confidence = 0.1        # 状态跃迁的相对误差阈值
+
+[cluster]
+mode = "off"
+epsilon_m = 1.5
+weight_z = 0.0
+weight_vel = 4.0
+min_points = 2
+
+[range]
+window = "hann"                # eWindowType (none|hann|blackman|hamming)
+
+# DC 天线耦合签名去除(P1):收发天线直接耦合在 Range FFT 的 DC 附近产生强度稳定、
+# 位置固定的杂波。先用 num_avg_chirps 个 chirp/发射分组求出每个 (tx,rx,bin) 的复数
+# 签名,此后逐帧减掉。⚠ 校准帧本身不补偿,补偿从下一帧起生效。
+#
+# 窗宽依据:下面 cfar 的 min_range_bin=8 是"直接把近 8 个 bin 全丢掉"的权宜之计,
+# 说明耦合大致占 bin 0..7。签名去除是正解——去掉杂波而不是去掉那段量程。
+# ⚠ 但在没有实测验证之前不要顺手调小 min_range_bin,两件事要分开做、分开验证。
+[range.dc_signature]
+enabled = false                # 默认关:关时 cube 逐位不变
+num_pos_bins = 8               # DC 正侧 bin 0..7
+num_neg_bins = 8               # DC 负侧 bin 248..255(负频回绕到高 bin 端)
+num_avg_chirps = 32            # 每发射分组累计 32 chirp(TDM 下正好一帧)
+
+[doppler]
+# P2 前硬编码 Hann。与 [range] window 是两笔独立的账:距离维的窗压距离旁瓣,
+# 多普勒维的窗压慢时间旁瓣(强静止杂波在 doppler 维泄漏会盖住邻近慢速目标)。
+window = "hann"                # eWindowType (none|hann|blackman|hamming)
+
+[cfar]
+# 双域 CFAR。级联次序与 TI DSP 实现一致:doppler 维先行 → range 维后行 → 两维都过才算
+# 2D 检出(手册 ch04 勘误 E1;原文把顺序写反了)。
+#
+# ⚠ 门限单位是**功率域 dB**(与 TI CLI 的 cfarCfg thresholdScale 同口径),不是 log2。
+# 换算:RdMap 存 log2 幅度,幅度 log2 +1 ⇒ 功率 ×4 ⇒ 20·log10(2) = 6.0206 dB。
+# P3 之前这里写的是 1.6(log2 幅度,无物理口径)⟺ 9.633 dB。
+# ⚠⚠ 别拿教科书公式 α = N(Pfa^(-1/N)−1) 直接换算:log2 域的算术平均在功率域是**几何
+# 平均**,同一 α 下门限期望低约 2.4 dB(N=16),实际 Pfa 会高于公式预测。门限只能实测
+# 标定,实测表见 docs/config_schema.md。
+# 峰值分组方案 —— 邻居值从哪来(对应 TI 的 DET_MATRIX_BASED=1 / CFAR_PEAK_BASED=2):
+#   det_matrix:直接读检测矩阵,不管邻居是否被 CFAR 检出 ⇒ 一个没过门限但幅度更大的
+#              邻居也能把当前峰淘汰掉(TI DSP 链的默认)
+#   cfar_peak :只从 CFAR 检出列表取,未检出的邻居按 0 计 ⇒ 保留得更多
+# 核形由两维的 peak_grouping 标志决定(3×3 / 1×3 / 3×1),与方案正交。
+peak_group_scheme = "det_matrix"
+min_range_bin = 8              # 输出裁剪下界(不改噪声估计)
+max_range_bin = 250            # 输出裁剪上界
+# 两端**完全排除**的 bin 数(TI 浮点 CFAR 的 leftSkipLen/rightSkipLen):连训练单元都不当。
+# 与 min/max_range_bin 的区别是本质的 —— FOV 只是不上报,skip 是不参与任何统计。
+# 近场天线耦合属于后者(它不是目标也不是噪声),但本项目默认走 [range.dc_signature] 去除
+# 耦合本身,所以这里默认 0;两条路只该选一条,别叠加。
+range_skip_low = 0
+range_skip_high = 0
+# 距离/多普勒的亚 bin 二次插值(三点抛物线)。⚠ TI 不做逐点亚 bin 修正 —— 它的 quadFit
+# 只用在 range bias 的标定测量里。本项目把它作为可选项加上,依据是手册 §14.3:log2 域
+# 的抛物线拟合对高斯主瓣**严格精确**,而我们的 RdMap 本来就是 log2 幅度 —— 精度白捡。
+# 只改上报的 xRange/xDoppler,bin 索引仍是整数(DOA 要拿它去 cube 抽快照)。
+sub_bin_interp = false
+
+[cfar.range]
+# range 轴有物理端点 ⇒ **非循环**窗,边界处退化为单侧比较。
+average_mode = "caso"          # ca | cago | caso | os | cacc
+                               # 前三个 = TI averageMode 0/1/2;os = TI 的独立库函数;
+                               # cacc = TI 浮点 CFAR 的 cfarType 3(功率域求和,不平均)
+                               # ⚠ cacc 的门限不可与 ca 直接比:等值窗下它的噪声估计高
+                               # 10·log10(N) dB(N=16 时 12.04 dB),照抄 ca 的值会全灭
+                               # caso:强目标的距离旁瓣会抬高一侧训练窗,取小者可让相邻
+                               # 弱目标仍被检出(已由 frame0 RdMap 数值验证)
+threshold_db = 9.633           # = 1.6 log2 × 6.0206
+guard_len = 8                  # 2026-10-10 按目标 bin 跨度标定(4 → 8):
+                               # 那辆车在 range 上跨中位 15 bin = 2.75 m、最大 26 bin = 4.76 m(≈车长
+                               # 4.58–4.78 m),而自遮蔽判据是 2·(guard+1)·rangeStep(conventions.md:50-53)——
+                               # guard=4 时阈值只有 1.83 m,目标埋进训练窗、车中央被自己遮蔽。
+                               # 改 8 后阈值 3.30 m(> 中位跨度),实测车体间隙 p50 1.10→0.73 m、
+                               # 车点 +19%;代价是检测点 27879→38590、航迹点 2432→2638(+8.5%);
+                               # H0 上 9.33M 单元虚警仍为 0。工具:python/bench/cfar/window.py。
+win_len = 8
+os_rank = 12                   # 仅 average_mode="os" 用:2×win_len 个参考单元里取第 12 小
+peak_grouping = false          # range 维不分组:相邻 range bin 的真实检测都保留
+
+[cfar.doppler]
+# 速度轴首尾相接 ⇒ **循环**窗,两侧恒满。
+average_mode = "ca"            # TI DSP 的 doppler 维就是循环 CA(库里没有 SOGO 的 wrap 版)
+threshold_db = 9.633
+guard_len = 2
+win_len = 4
+os_rank = 6
+peak_grouping = false           # doppler 维分组:每个 doppler 簇只留峰
+
+[doa]
+variant = "beam"               # (beam|music|dml|dbf2d|auto;dbf2d 必须同时给 [doa.scan] 网格);
+                               # auto=从阵列坐标推断(eChainDoaRouteRecommend);
+                               # beam = 谱峰(DFT 波束形成),1D/2D 由阵列几何自动分流(融合原 fft/fft1d),
+                               # 配了 [doa.scan] 同一估计器改走逐格复加权后端(2026-09-12 兼并原 dbf2d)
+
+# 扩展最大速度(TI extendedMaxVelocity):TDM 下 v_max 被 numTx 除,超速目标的 doppler
+# 折叠会破坏跨 TX 相位、进而破坏角度谱。开启后按 numTx 个包裹假设各算一次方位谱,取峰
+# 功率最大者。SR61(3TX)覆盖从 ±13.7 扩到 ±41.1 m/s。
+# ⚠ 判别裕度随 numTx 增大而缩小:错误假设的方位峰 2TX 时只有正确假设的 0.65(−3.7dB),
+# 3TX 时是 0.85(−1.4dB)。SR61 是 3TX,裕度不宽裕;且同一 range/doppler 有多目标时该
+# 算法失效(TI 自己也声明)。
+# ⛔ **本采集上实测误判率 8.9%**:20Km_h 里车只有 ~5.5 m/s ≪ v_max 13.7,正确假设必然
+# 是 m=0,而开启后 8.16% 的点选了 m=−1、0.76% 选了 m=+1,凭空造出 −27~+34 m/s 的速度。
+# 这就是 1.4dB 裕度在真实噪声下的价值。**默认关**,复现见 python/bench/doa/extmaxvel.py。
+extended_max_velocity = false
+# 角谱峰的亚 bin 二次插值。⚠ TI 没有这一步(它靠 4×4 阵补零到 64×64 做插值),
+# 本项目在补零之上再做三点抛物线拟合。默认关。
+angle_interp = false
+
+# 角度视场:逐点拒绝。与 TI 的 Wx ∈ limitScale·[sinMin,sinMax] 判据逐字等价
+# (limitScale = √(1−Wz²) = cosφ,两边同除即得 sinθ_az ∈ [sinMin,sinMax])。
+# ⚠ enabled 不可省:四个角度全 0 的字面含义是「只接受正前方 0°」,不是「不设限」。
+#
+# 默认值取 ±60°,依据是阵列物理而不是数据:4 元半波长阵在 ±60° 之外有效孔径只剩
+# cos60° = 一半,波束严重展宽。实测代价(20Km_h 401 帧 10163 点):方位 ±60° 保留
+# 97.9%(±70° 保留 99.7%、±50° 只剩 86.7%);俯仰 |el| 的 p99 才 34°,±60° 一个都不剪。
+# ⚠ 别指望它治 |z| 离群点:|z|>4m 的点距离中位 33.7m、俯仰中位仅 7.2°,是「远距×中等
+# 俯仰」的乘积,俯仰 FOV 剪不掉(见 core/dpu/doa/cfg.h 的实测记录)。
+[doa.fov]
+enabled = false
+az_min_deg = -60.0
+az_max_deg = 60.0
+el_min_deg = -60.0
+el_max_deg = 60.0
+
+# 多目标波束形成(TI multiObjBeamForming):同一 (range,doppler) 单元里可能有多个角度
+# 不同的目标 —— 展布目标(实测 4.58m 长的小汽车)在一个距离门里跨多个方位就是这种情形。
+# 在方位谱上圈掉主峰及其裙边,在剩余区间找次大峰,P2nd > threshold_scale × P1st 才接受。
+[doa.multi_peak]
+enabled = false
+threshold_scale = 0.5          # 功率比(0~1);TI 无硬编码默认值,由应用下发
+
+[array]
+file = "sr61_aop.csv"          # 相对本 profile 目录
+grid_rows = 4                  # 俯仰向网格行数(SR61 AOP)
+grid_cols = 4                  # 方位向网格列数

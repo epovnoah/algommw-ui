@@ -1,0 +1,202 @@
+# 固件生产波形:awr2e44p-main/mss/mmw_cli.c(2026-11-14 核对)。
+# A/B:4TX×4RX,6 子带,768 chirp,512 记录行(CP 后 510 ADC),PRI 28/32 us,+977835.724 Hz 步进。
+# 每子帧 70 ms;保持本项目浮点 FFT/检测矩阵与现有 chain/driver,不是 HWA 整数逐位仿真。
+# HWA winLen=16 是总参考单元数,本项目 win_len=8 是单侧;零基 OS k=7 对应一基 os_rank=8。
+# 硬件 raw RD 绝对门限依赖 HWA 定点标度,没有校准映射时不套到浮点功率上,见 ADR 0013。
+
+[ingest]
+format = "afm761"
+rx_map = [3, 2, 1, 4]          # 同 ccm 的 rx_adc_order = (2,1,0,3)
+cp_adc = true                  # 去 CP 行、末尾补零;实采样只有前 510 点,距离门只用前半
+
+[waveform]
+modulation = "ddm"
+num_tx = 4
+num_rx = 4
+num_adc_samples = 512
+num_doppler_chirps = 128       # 每子带 doppler bin 数(= RdMap doppler 维)
+num_chirps_per_frame = 768     # = num_subbands × num_doppler_chirps
+num_subbands = 6
+
+start_freq_ghz = 77.0
+freq_slope_mhz_per_us = 8.79   # = 8.79e12 Hz/s
+sample_rate_msps = 30.0
+idle_time_us = 4.0
+ramp_end_time_us = 24.0
+adc_start_time_us = 4.0
+chirp_step_khz = 977.835724
+
+range_step = 0.999201612       # m/bin
+doppler_step = 0.08996071052224229
+fine_range_step = 0.19960140207601645
+frame_period_ms = 70.0         # CLI subFramePeriodicity:每个子帧 70 ms
+
+[calib]
+range_bias_m = 0.0
+
+[mount]
+elev_tilt_deg = 0.0
+height_m = 0.0
+
+
+[cluster]
+mode = "off"
+epsilon_m = 1.5
+weight_z = 0.0
+weight_vel = 4.0
+min_points = 2
+
+[range]
+window = "hann"                # 板端 rangeProc/DopplerProc 的 HWA 窗型
+
+[range.dc_signature]
+enabled = false
+num_pos_bins = 8
+num_neg_bins = 8
+num_avg_chirps = 64
+
+[doppler]
+window = "hann"                # 板端 DopplerProc 的 HWA 窗型
+
+[cfar]
+peak_group_scheme = "det_matrix"
+min_range_bin = 0
+max_range_bin = 255
+range_skip_low = 0
+range_skip_high = 256
+sub_bin_interp = false
+cross_peak_grouping = false
+
+[cfar.range]
+# 口径 A(2026-11-24 由用户裁定,与 afmccmdualrev、基线、文档一致):只用速度维检测(距离维关)、
+# 两维峰值分组关。11-19 曾对齐固件 cfarCfg(距离开、分组开、速度 9/6/5,口径 B):每帧约 160 点,
+# 一辆车常只剩 1–3 点,1113-2 上航迹点为 0(docs/afmccmdualdesign 第 3.4 节)。
+enabled = false
+os_edge_scale = true
+average_mode = "os"
+threshold_db = 10.0
+guard_len = 0
+win_len = 8
+os_rank = 8                   # 16 个参考单元的第 8 小值
+peak_grouping = false
+average_domain = "power"
+
+[cfar.doppler]
+os_edge_scale = false
+average_mode = "os"
+threshold_db = 10.0
+guard_len = 0
+win_len = 8
+os_rank = 8
+peak_grouping = false
+average_domain = "power"
+
+[doa]
+variant = "corr"
+extended_max_velocity = false
+angle_interp = false
+# 测角相干度门限(全阵口径:估出方向上 16 通道的 |aᴴy|²/(N‖y‖²),不是工作台「相干度」列的水平相关谱口径;ADR 0019)。
+# 1113-1 行驶数据:相干度 <0.5 的点方位误差中位 20° 以上(静止点按自运动由多普勒反推方位);去掉 6–8% 的点,
+# afmdrive 跟踪链覆盖基本不变(1113-3 −0.026,其余 ±0.002),ghost 略降。与 afmccmdualslow 同值。
+min_coherence = 0.5
+# 近处俯仰混叠的帧内修复(ADR 0019):两条垂直基线矛盾的点,俯仰改取同帧邻域自洽点的俯仰中位,点数不变。
+elevation_repair = true
+
+[doa.fov]
+enabled = true
+elevation_skip_max_range_bin = 10
+az_min_deg = -65.0
+az_max_deg = 65.0
+el_min_deg = -30.0
+el_max_deg = 30.0
+
+[doa.multi_peak]
+enabled = false
+threshold_scale = 0.5
+
+
+[track]
+# 车载动目标跟踪(2026-11-24,ADR 0018)。依据:1113-1/2/3 行驶采集(自车 8–13 m/s)上的离线重放,
+# 代理真值 = 按 RANSAC 自运动分出的运动点簇,串成 ≥15 帧(1 s)的目标链;留出数据 1112-3、
+# 静止雷达采集同向验证。core 默认下长链覆盖率 0.26/0.01/0.00(1112-3 为 0.04),本段配置下
+# 0.82/0.82/0.84(1112-3 0.86),径向速度误差中位 0.04–0.07 m/s。afmccmdualrev 与本段逐字相同。
+# 场景盒按量程 255.8 m;y < 4 m 释放:那里每帧约 8 个自车附着的零多普勒点(天线罩 / 泄漏),
+# 车载时对地速度 ≠ 0 会被当成运动目标。
+scene_x_m = [-260.0, 260.0]
+scene_y_m = [4.0, 260.0]
+# 车身多散射点 + 粗距离–速度耦合拖影,运动簇内距离散布 σ≈1 m;方位实测 σ 0.2°–0.9°(取 0.5°)。
+meas_noise_r = 1.0
+meas_noise_az = 7.615e-5
+alloc_points = 3
+hit_points = 1
+max_tracks = 64
+# 自运动:逐帧估雷达水平速度,按对地径向速度 1 m/s 分静止 / 运动(行驶采集对地残差 88% 在
+# 0.75 m/s 以下,运动目标集中在 5–20 m/s)。静止点不起航迹、不算确认命中,仍维持已有航迹。
+# 雷达不动时估出约 0 m/s(静止采集中位 0.003),同一配置可用于固定安装;要跟踪静止物时
+# 改 static_policy = "track"、ego_motion = false。
+static_policy = "suppress"
+ego_motion = true
+ego_static_mps = 1.0
+# 漏检外推、预门计入量测噪声、起航协方差按量测重设(横向速度 σ 10 m/s):三者在 1112-3 上
+# 单独去掉时长链覆盖率分别降到 0.85 / 0.49 / 0.75。
+coast = true
+gate_noise = true
+init_tan_vel_mps = 10.0
+
+[array]
+file = "array.csv"      # 相对本 profile 目录;标定为 ccm 内置 afm761-2026-10 复增益,见该文件头
+grid_rows = 5                  # z 半λ 网格 −1..3 共 5 行(网格注记;直接加权扫描不消费)
+grid_cols = 35                 # x 半λ 网格 0..34 共 35 列(同上)
+
+# 同一载频步进,只改变 PRI;其余波形物理量继承 A,派生量分别校验。
+[waveform.alternate]
+idle_time_us = 8.0
+doppler_step = 0.078715621706962
+
+[pair]
+enabled = true
+# 2026-11-20 解模糊优化(ADR 0016):扩展目标共享伙伴(只接受已确认结果)、k−2 同类帧延续、
+# 已确认高速点被遮挡时按展开速度救回。实采点数:雷达运动 664951→664859、1113-2 571907→572560、
+# 1112-3 869646→872295;1112-3 上 31–36 m/s 的真实高速目标展开得更完整。同列爬坡不开:
+# 它让救回判重更准,1113-2 / 1112-3 点数分别少 2.7% / 1.9%;距离门 3 m 同样减少点数,保持 1 m。
+share_taken = true
+carry_confirmed = true
+rescue_unfolded = true
+max_unfold = 2
+range_gate_m = 1.0
+velocity_gate_mps = 0.6
+max_speed_mps = 97.25
+# 速度身份验证:视线角、阵列签名、双向候选唯一性;近零折叠也允许枚举。
+angle_gate_deg = 10.0
+min_coherence = 0.5
+# 2026-11-25 盲速/跨物体错配修复(ADR 0020):(0,0) 候选也查阵列相关度;方位差进关联代价,
+# σ = √(0.5² + (横向 1 m / R)²) 度(静止点跨帧测角重复性 + 车半宽)。合成对抗测试台
+# (python python/bench ccm adversarial)盲速 E1:slow 13.3%→1.1%、dual 13.9%→7.5%,σ 0.25–1°、
+# 横向 0.5–2 m 为平台;1125/dualslow 盲速帧车上 v≈0 点 3.75→0.57/帧,点数基本不变。
+zero_identity = true
+azimuth_sigma_deg = 0.5
+lateral_extent_m = 1.0
+ambiguity_margin = 0.1
+min_overlap_speed_mps = 0.3
+overlap_range_bins = 1.5
+overlap_doppler_bins = 1.5
+occupant_range_bins = 4.0
+mask_margin_db = 2.2489057294217365
+# 实际 HWA Q11:765×20log10(2)/2048,不照抄固件注释里约 3dB 的近似。
+
+[cfar.segments]
+end_bins = [40, 80]
+range_threshold_db = [12.0, 9.0, 7.0]
+# 口径 A:固件 cfarRangeThreshCfg 的速度门限 9/6/5 各加 2 dB。只开速度维、不分组时
+# 默认采集全量约 511 点/帧,路测各段 520–720 点/帧。
+doppler_threshold_db = [11.0, 8.0, 7.0]
+
+[cfar.dominant_supplement]
+enabled = true
+start_bin = 19
+end_bin = 127
+dominance_threshold_db = 2.9397460514060664 # 1000 raw,Q11 log2 幅度
+threshold_db = 2.9985409724341876           # 1020 raw
+win_len = 8
+guard_len = 2
+limit = 80

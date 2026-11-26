@@ -1,0 +1,6 @@
+"""UI 数据容器的容量常量,不依赖 C 头文件或共享库。"""
+
+MAX_ADC_SAMPLES = 512
+MAX_RX = 4
+MAX_CHIRPS_PER_FRAME = 768
+MAX_VIRTUAL_ANT = 16

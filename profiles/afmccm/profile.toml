@@ -1,0 +1,170 @@
+# AFM761 CCM(步进频 DDMA-CCM)profile —— 第三块板配置:同一块 afm761 硬件,载频逐 chirp 递增 Δf,
+# 6 子带 × 128 = 768 chirp/帧。CFAR 之后走「距离-速度解耦」(core/dpu/decouple,ADR 0010)而不是速度展开。
+# 载入器:python/binding/config.py 的 load_profile();采集:~/Dev/ccm/data/Single/车子(见 binding/paths.py)。
+#
+# 参数来源:ccm.io.open_source 对该采集的解析结果(RadarConfig):fc = 77 GHz、fs = 30 MHz、n_sample = 512、
+# idle = 4 µs、adc_start = 4 µs、ramp = 24 µs、chirp_slope = 8.79e12 Hz/s、frame_period = 70 ms、
+# chirp_step_hz = 1e6、n_subband = 6、n_dop_bin = 128、real_sampling = True、CP_ADC = True;
+# profile 0/1 交替但两个 profile 的步进都是 1 MHz(ccm 的 _dual_profile_source 注释),参数相同,单 profile 处理即可。
+#
+# ⚠ step 红线同其它两板:range_step / doppler_step / fine_range_step 是波形第一性原理的派生量,
+# 载入器用精确 c = 299792458 独立推导并校验 stored ≈ derived 在 1% 内。stored 值是**本仓库推导式**的
+# 计算结果(不抄 ccm 的数,ccm 用 c = 3e8):
+#   B_valid = k·N_adc/fs = 8.79e12 × 512/30e6 = 150.016 MHz
+#   range_step  ΔR = c/(2·B_valid)                         = 0.999201612 m/bin
+#   fc = f0 + B_valid/2 + adc_start·k + (N−1)·Δf/2 = 77e9 + 75.008e6 + 35.16e6 + 383.5e6 = 77.493668 GHz
+#   doppler_step ΔV = c/(2·fc·N·Tc),N = 768,Tc = idle + ramp_end = 28 µs  = 0.0899508431 (m/s)/bin
+#   fine_range_step S_f = c/(2·Δf·N) = 299792458/(2×1e6×768)  = 0.195177382 m/全局慢时间 bin
+#     (模糊周期 S_f·N = c/(2Δf) = 149.896 m)
+#   耦合系数 ρ = Δf·PRF/k = 1e6 /28e-6 / 8.79e12 = 0.00406306(只推导,不落 profile)
+# 速度上限 ±ΔV·N/2 = ±34.5 m/s。
+
+[ingest]
+# 采集格式同 afm761(小端 int16 列主序,rx 最快),另有 CP_ADC:每条 chirp 记录开头 2 个采样行是 CP 字。
+format = "afm761"
+rx_map = [3, 2, 1, 4]          # 同 ccm 的 rx_adc_order = (2,1,0,3)
+cp_adc = true                  # 去 CP 行、末尾补零;实采样只有前 510 点,距离门只用前半
+
+[waveform]
+modulation = "ddm"
+num_tx = 4
+num_rx = 4
+num_adc_samples = 512
+num_doppler_chirps = 128       # 每子带 doppler bin 数(= RdMap doppler 维)
+num_chirps_per_frame = 768     # = num_subbands × num_doppler_chirps
+num_subbands = 6
+
+start_freq_ghz = 77.0
+freq_slope_mhz_per_us = 8.79   # = 8.79e12 Hz/s
+sample_rate_msps = 30.0
+idle_time_us = 4.0
+ramp_end_time_us = 24.0
+adc_start_time_us = 4.0
+chirp_step_khz = 1000.0        # 载频步进 Δf = +1 MHz/chirp(CCM)。缺省 0 = 无步进
+
+range_step = 0.999201612       # m/bin
+doppler_step = 0.0899508431    # (m/s)/bin(中心频率含步进的平均载频)
+fine_range_step = 0.195177382  # m/全局慢时间 bin = c/(2·Δf·N),带符号;与推导值交叉校验
+frame_period_ms = 70.0         # 板端帧周期(ccm 解析结果),≈ 14.3 Hz
+
+[calib]
+# 实测标定量。afm761 未做角反射器距离标定,0 = 不补偿。
+range_bias_m = 0.0
+
+[mount]
+elev_tilt_deg = 0.0
+height_m = 0.0
+
+# 跟踪参数 F7 行人重标定时再开;此处整段省略 = 全 core 默认(vChainTrackDefaults)。
+
+[cluster]
+mode = "off"
+epsilon_m = 1.5
+weight_z = 0.0
+weight_vel = 4.0
+min_points = 2
+
+[range]
+window = "hann"                # ⚠ F5 对齐项:参考侧窗型尚未核对,占位 SR61 同款
+
+# DC 耦合签名去除:占位参数(enabled=false 不生效)。DDM 下 TX 分组数=1(全部 TX 同发),
+# avg_chirps 的语义与 SR61(TDM 每 TX 分组)不同,F3/F5 实测后再调。
+[range.dc_signature]
+enabled = false
+num_pos_bins = 8
+num_neg_bins = 8
+num_avg_chirps = 64
+
+[doppler]
+window = "hann"                # ⚠ F5 对齐项:占位
+
+# CFAR:数值来自 afm761_modular config.py 的实测参数(range CASO w8/g4 8dB ×
+# doppler CASO w4/g2 10dB,设备事实非算法移植)。⚠ 边界/循环语义差异 F5 复核。
+[cfar]
+peak_group_scheme = "det_matrix"
+min_range_bin = 0
+# ⛔ 镜像截断:实采样,range FFT 只有 256 个正频率 bin(512/2)有物理意义,256..511 是
+# Hermitian 镜像区,CFAR 会把镜像也检成目标。max_range_bin = 255 保证镜像区永不出点。
+max_range_bin = 255
+# skip_low = 2:最低 2 个距离门(bin 0/1)连训练单元都不当。距离门 0 是直流/天线耦合点:解耦之后它得到
+# 负距离或大速度的无意义解(粗距离 ≈ 0 时 R = (rb·S_r − G·ρ·S_f)/(1−ρ) 由慢时间折叠位 G 主导),
+# 白白进点云和航迹。选 skip 而不是 min_range_bin:耦合不是目标也不是噪声,留作训练单元会把 bin 2~5 的
+# 噪声估计抬高(见 docs/config_schema.md [cfar] 与 dcsig 一节);min_range_bin 只裁输出、不改噪声估计。
+range_skip_low = 2
+# skip_high = 256:镜像区**连训练单元都不当**(同 afm761 的 192 / 384 一对,这里 256 / 512):
+# 若不 skip,bin≤255 目标右侧的窗会探进镜像区把噪声估计污染掉。
+range_skip_high = 256
+sub_bin_interp = false
+# 十字分组:参考流(afm761 legacy)的峰值分组是 range/doppler 两轴各自独立做一维
+# 局部极大后取交集(十字 4 邻),不是 3×3 方核——方核对角 veto 会把 RD 峰扩散块的
+# 轴上次峰也压掉,点数差约 30%(实测 24 vs 15)。配合下方两维 peak_grouping = true。
+cross_peak_grouping = false
+
+[cfar.range]
+average_mode = "caso"
+threshold_db = 8.0
+guard_len = 4
+win_len = 8
+os_rank = 12                   # 仅 os 模式用;caso 下无效
+peak_grouping = false
+# 平均域:log2(RdMap 单元算术平均)= 功率域几何平均,门限等效偏低 ~2.4dB,虚警偏多
+# (实测点数 ×1.3);power = 功率域算术平均,与参考流 LINEAR 乘性门限同一语义。
+average_domain = "power"
+
+[cfar.doppler]
+average_mode = "caso"
+threshold_db = 10.0
+guard_len = 2
+win_len = 4
+os_rank = 6
+peak_grouping = false
+average_domain = "power"
+
+[doa]
+# 变体名 corr = 相关谱 + 垂直基线两步法(ADR 0012),与板载固件 afm761_doa.c 同一算法(通道对从阵列几何
+# 推导)。2026-11-12 对拍(python python/bench ccm parity,d 段,afmccm 前 30 帧 3333 配对点):与 ccm 的
+# 固件算法 Python 版方位带符号中位差 −0.022°(|Δ| 中位 0.035° / p95 0.35°),角反方位与 ccm 同号。
+# 当前全采集回归:900/97880/52(帧/检测点/航迹点),skip 与 corr 的分项影响见 ADR 0012。
+# corr 不吃扫描网格(配了 init 返 eErrNotImpl),所以下面的 [doa.scan] 段整段注释掉了;要切回 dbf2d
+# (全网格复加权,afm761 默认)时,把变体改成 "dbf2d" 并取消 [doa.scan] 的注释。
+# (dbf2d 是 beam 估计器的直接加权后端:afm761 是 16/175 稀疏 3-z 阵,beam 的角度 FFT 路径摆不了格。)
+variant = "corr"
+# 扩展最大速度是 TDM 折叠机制的解药;DDM 速度由解耦级给出(±34.5 m/s),机制不适用。
+extended_max_velocity = false
+angle_interp = false
+
+[doa.fov]
+enabled = false
+az_min_deg = -60.0
+az_max_deg = 60.0
+el_min_deg = -30.0
+el_max_deg = 30.0
+
+[doa.multi_peak]
+enabled = false
+threshold_scale = 0.5
+
+# 变体 = "dbf2d" 时取消下面整段注释(corr 不消费网格,配了会在 init 被拒):
+# [doa.scan]
+# 角度扫描网格(度,闭区间含端点),来源:mmwlab afm761 profile 的 az_scan/el_scan
+# (净室只取参数值;算法本体是 C core 净室写的直接加权扫描,不是参考实现代码)。
+# 段名 2026-09-12 前叫 [doa.dbf2d],旧名仍接受(load_profile 兼容),两个同时给出会报错。
+# 141×121=17061 格 ≤ 容量上限 32768。超出网格的目标被拉向网格边缘 —— 部署方
+# 负责把网格盖住视场;FOV 段可作网格内的二次裁剪(估角后逐点拒)。
+# az_start_deg = -70.0
+# az_stop_deg = 70.0
+# az_step_deg = 1.0
+# el_start_deg = -30.0
+# el_stop_deg = 30.0
+# el_step_deg = 0.5
+
+[track]
+# 沿用 core 默认(整段省略 = vChainTrackDefaults)。afm761 的 meas_noise_r = 0.144831 是按**它的** range bin
+# 量化(ΔR = 1.318 m,方差 ΔR²/12)标定的;本板距离经解耦后精度远优于 1 个粗 bin
+# (合成链实测 |ΔR| ≈ 0.01 m,见 python/tests/integration/test_ccm_chain.c),照搬会过度保守。
+# 未针对 CCM 实采做跟踪重标定。
+
+[array]
+file = "afmccm_array.csv"      # 相对本 profile 目录;标定为 ccm 内置 afm761-2026-10 复增益,见该文件头
+grid_rows = 5                  # z 半λ 网格 −1..3 共 5 行(网格注记;直接加权扫描不消费)
+grid_cols = 35                 # x 半λ 网格 0..34 共 35 列(同上)
